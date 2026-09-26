@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bbagent.models import RuleKind, ScopePolicy, ScopeRule, ProgramPermissions
 from bbagent.graph import SurfaceGraph, Node
-from bbagent.recon import parsers, planner, runner
+from bbagent.recon import adapters, parsers, planner, runner
 
 
 def test_parse_subfinder_plain():
@@ -53,6 +53,19 @@ def test_expand_plan_probes_unprobed_hosts():
     g.add(Node("subdomain", "a.acme.com", "recon:subfinder"))
     steps = planner.expand_plan(g)
     assert any(s.tool == "httpx" and s.target == "a.acme.com" for s in steps)
+
+
+
+def test_active_adapter_injects_headers_and_rate():
+    spec = adapters.get("httpx")
+    args = spec.build_args("http://x", {"User-Agent": "ua (bugcrowd)"}, 10)
+    assert "-H" in args and "User-Agent: ua (bugcrowd)" in args
+    assert "-rl" in args and "10" in args
+
+
+def test_passive_adapter_ignores_headers():
+    args = adapters.get("subfinder").build_args("x.com", {"User-Agent": "ua"}, 10)
+    assert "-H" not in args and "-rl" not in args
 
 
 if __name__ == "__main__":

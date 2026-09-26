@@ -3,39 +3,51 @@ action class + parser. No tool runs here; execution goes through toolrun.run so
 the scope + policy gate always applies first.
 """
 from dataclasses import dataclass
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 from ..models import ActionClass
 from . import parsers
+
+
+def _hdr_flags(headers: Optional[Dict[str, str]]) -> List[str]:
+    out: List[str] = []
+    for k, v in (headers or {}).items():
+        out += ["-H", "%s: %s" % (k, v)]
+    return out
+
+
+def _rl_flags(rate: Optional[float]) -> List[str]:
+    return ["-rl", str(int(rate))] if rate else []
+
+
+# Active tools that touch the target get header injection (e.g. a required
+# "bugcrowd" User-Agent) and rate limiting. Passive OSINT tools ignore them.
+def _subfinder(t, h, r): return ["-d", t, "-silent"]
+def _dnsx(t, h, r): return ["-d", t, "-a", "-resp", "-silent", "-json"]
+def _httpx(t, h, r):
+    return ["-u", t, "-json", "-silent", "-tech-detect", "-title", "-status-code"] + _hdr_flags(h) + _rl_flags(r)
+def _katana(t, h, r):
+    return ["-u", t, "-jc", "-silent"] + _hdr_flags(h) + _rl_flags(r)
+def _nuclei(t, h, r):
+    # nuclei 3.x uses -jsonl (the old -json flag was removed)
+    return ["-u", t, "-jsonl", "-silent"] + _hdr_flags(h) + _rl_flags(r)
 
 
 @dataclass
 class ToolSpec:
     name: str
     action_class: ActionClass
-    build_args: Callable[[str], List[str]]
+    build_args: Callable[[str, Optional[Dict[str, str]], Optional[float]], List[str]]
     parser: Callable[[str], List[dict]]
     target_kind: str          # what target it takes: domain|host|url
 
 
 REGISTRY: Dict[str, ToolSpec] = {
-    # passive/OSINT subdomain enumeration
-    "subfinder": ToolSpec("subfinder", ActionClass.B_LOW_ACTIVE,
-                          lambda t: ["-d", t, "-silent"], parsers.parse_subfinder, "domain"),
-    # DNS resolution of discovered hosts
-    "dnsx": ToolSpec("dnsx", ActionClass.B_LOW_ACTIVE,
-                     lambda t: ["-d", t, "-a", "-resp", "-silent", "-json"], parsers.parse_dnsx, "domain"),
-    # probe live web servers
-    "httpx": ToolSpec("httpx", ActionClass.B_LOW_ACTIVE,
-                      lambda t: ["-u", t, "-json", "-silent", "-tech-detect", "-title", "-status-code"],
-                      parsers.parse_httpx, "host"),
-    # crawl for endpoints
-    "katana": ToolSpec("katana", ActionClass.B_LOW_ACTIVE,
-                       lambda t: ["-u", t, "-jc", "-silent"], parsers.parse_katana, "url"),
-    # template-based vuln scan -> security testing, needs approval
-    # nuclei 3.x uses -jsonl (the old -json flag was removed)
-    "nuclei": ToolSpec("nuclei", ActionClass.C_SECURITY_TEST,
-                       lambda t: ["-u", t, "-jsonl", "-silent"], parsers.parse_nuclei, "url"),
+    "subfinder": ToolSpec("subfinder", ActionClass.B_LOW_ACTIVE, _subfinder, parsers.parse_subfinder, "domain"),
+    "dnsx": ToolSpec("dnsx", ActionClass.B_LOW_ACTIVE, _dnsx, parsers.parse_dnsx, "domain"),
+    "httpx": ToolSpec("httpx", ActionClass.B_LOW_ACTIVE, _httpx, parsers.parse_httpx, "host"),
+    "katana": ToolSpec("katana", ActionClass.B_LOW_ACTIVE, _katana, parsers.parse_katana, "url"),
+    "nuclei": ToolSpec("nuclei", ActionClass.C_SECURITY_TEST, _nuclei, parsers.parse_nuclei, "url"),
 }
 
 

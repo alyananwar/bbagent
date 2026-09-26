@@ -61,6 +61,16 @@ def _detect_permissions(text: str) -> ProgramPermissions:
     if m:
         perms.rate_limit_rps = float(m.group(1))
 
+    # required identifying User-Agent, e.g. "include the string bugcrowd in the User-Agent"
+    ua = re.search(r"include the string (\S+) in .{0,25}user.?agent", low)
+    if ua:
+        token = ua.group(1).strip("\"'.")
+        perms.required_headers["User-Agent"] = "bbagent-research/0.1 (%s)" % token
+
+    # required custom headers, e.g. "X-Request-Purpose BugcrowdResearch"
+    for name, value in re.findall(r"(X-[A-Za-z][\w-]*)[:\s]+([A-Za-z][\w-]+)", text):
+        perms.required_headers[name] = value
+
     for kw in ("dos", "denial of service", "social engineering", "physical", "spam",
                "brute force", "automated exploitation"):
         if kw in low:

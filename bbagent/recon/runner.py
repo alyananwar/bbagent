@@ -8,6 +8,9 @@ from .. import toolrun
 from . import adapters
 from .planner import PlanStep
 
+# conservative default request rate for active tools when the program states none
+DEFAULT_ACTIVE_RPS = 10
+
 
 def _host_of(url: str) -> str:
     return (urlparse(url).hostname or url).lower()
@@ -51,7 +54,9 @@ def execute_step(step: PlanStep,
     blocks it (caller decides how to surface that). On success, folds results and
     returns (run_record, parsed_records)."""
     spec = adapters.get(step.tool)
-    args = spec.build_args(step.target)
+    headers = policy.permissions.required_headers or {}
+    rate = policy.permissions.rate_limit_rps or DEFAULT_ACTIVE_RPS
+    args = spec.build_args(step.target, headers, rate)
     run = toolrun.run(step.tool, args, step.target, spec.action_class, policy,
                       approved=approved, timeout=timeout)
     records: List[dict] = []
