@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.bbagent/
+*.db
+graph_*.json
+.venv/

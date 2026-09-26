@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bbagent"
+version = "0.1.0"
+description = "Authorized bug bounty research core: deterministic scope + policy gate, evidence, findings, reporting."
+requires-python = ">=3.9"
+dependencies = []          # core is stdlib-only on purpose
+
+[project.scripts]
+bbagent = "bbagent.cli:main"
+
+[tool.setuptools]
+packages = ["bbagent"]
