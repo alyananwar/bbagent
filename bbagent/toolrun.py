@@ -80,9 +80,13 @@ def run(tool: str,
         run_rec.finished_at = datetime.now(timezone.utc).isoformat()
         return run_rec
 
-    proc = subprocess.run([tool, *args], capture_output=True, text=True, timeout=timeout)
-    run_rec.exit_code = proc.returncode
-    run_rec.stdout_ref = proc.stdout[-4000:]
-    run_rec.stderr_ref = proc.stderr[-2000:]
+    try:
+        proc = subprocess.run([tool, *args], capture_output=True, text=True, timeout=timeout)
+        run_rec.exit_code = proc.returncode
+        run_rec.stdout_ref = proc.stdout[-8000:]
+        run_rec.stderr_ref = proc.stderr[-2000:]
+    except subprocess.TimeoutExpired:
+        run_rec.exit_code = None
+        run_rec.stderr_ref = "timeout after %ss" % timeout
     run_rec.finished_at = datetime.now(timezone.utc).isoformat()
     return run_rec

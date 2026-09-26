@@ -33,8 +33,9 @@ REGISTRY: Dict[str, ToolSpec] = {
     "katana": ToolSpec("katana", ActionClass.B_LOW_ACTIVE,
                        lambda t: ["-u", t, "-jc", "-silent"], parsers.parse_katana, "url"),
     # template-based vuln scan -> security testing, needs approval
+    # nuclei 3.x uses -jsonl (the old -json flag was removed)
     "nuclei": ToolSpec("nuclei", ActionClass.C_SECURITY_TEST,
-                       lambda t: ["-u", t, "-json", "-silent"], parsers.parse_nuclei, "url"),
+                       lambda t: ["-u", t, "-jsonl", "-silent"], parsers.parse_nuclei, "url"),
 }
 
 
