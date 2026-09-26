@@ -21,7 +21,7 @@ def test_run_recon_records_outcomes():
     with tempfile.TemporaryDirectory() as d:
         db = DB(os.path.join(d, "t.db"))
         eng = db.add_engagement(Engagement(program="acme"))
-        orch = Orchestrator(db, eng, _policy())
+        orch = Orchestrator(db, eng, _policy(active=False))
         summary = orch.run_recon()
         # tools aren't installed in CI, so steps land in not_installed, but the
         # gate ran and logged decisions
@@ -38,7 +38,7 @@ def test_nuclei_needs_approval_when_not_approved():
     with tempfile.TemporaryDirectory() as d:
         db = DB(os.path.join(d, "t.db"))
         eng = db.add_engagement(Engagement(program="acme"))
-        orch = Orchestrator(db, eng, _policy())
+        orch = Orchestrator(db, eng, _policy(active=False))
         # seed a URL so expand_plan proposes nuclei
         from bbagent.graph import Node
         orch.graph.add(Node("url", "https://a.acme.com/", "seed"))

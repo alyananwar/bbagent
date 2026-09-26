@@ -74,6 +74,17 @@ def test_intake_from_targets():
     assert "*.foo.com" in values and "foo.com" in values
 
 
+
+def test_parses_required_user_agent():
+    pol = program_intel.parse_brief("In scope:\nx.com\nRules:\nInclude the string bugcrowd in the User-Agent.")
+    assert "bugcrowd" in pol.permissions.required_headers.get("User-Agent", "")
+
+
+def test_parses_required_custom_header():
+    pol = program_intel.parse_brief("In scope:\nx.com\nRules:\nRequired header: X-Request-Purpose BugcrowdResearch")
+    assert pol.permissions.required_headers.get("X-Request-Purpose") == "BugcrowdResearch"
+
+
 if __name__ == "__main__":
     from _run import run_module
     import sys as _s

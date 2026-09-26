@@ -78,6 +78,13 @@ def test_empty_target_unknown():
     assert d.decision == ScopeDecisionKind.UNKNOWN, d
 
 
+
+def test_url_root_rule_matches_bare_host():
+    from bbagent.models import ScopePolicy as SP, ScopeRule as SR
+    pol = SP(in_scope=[SR(RuleKind.URL, "https://www.example.com/")])
+    assert scope.evaluate("www.example.com", pol).decision == ScopeDecisionKind.IN_SCOPE
+
+
 if __name__ == "__main__":
     from _run import run_module
     import sys as _s

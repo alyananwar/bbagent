@@ -92,7 +92,15 @@ def _match_rule(target: str, rule: ScopeRule) -> bool:
     kind, host, port = _classify_target(target)
 
     if rule.kind == RuleKind.URL:
-        return kind == "url" and _url_matches(target, rule.value)
+        if kind == "url":
+            return _url_matches(target, rule.value)
+        # a bare host also matches a URL rule whose path is the site root, so
+        # "www.example.com" is in scope when "https://www.example.com/" is listed
+        if kind == "host":
+            rp = urlparse(rule.value if "://" in rule.value else "http://" + rule.value)
+            if (rp.path or "/") == "/":
+                return _norm_host(rp.hostname or "") == host
+        return False
 
     if rule.kind in (RuleKind.DOMAIN, RuleKind.WILDCARD_DOMAIN):
         if kind == "ip":

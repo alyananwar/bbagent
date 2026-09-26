@@ -7,11 +7,11 @@ approval, and it never submits anything.
 """
 from typing import Dict, FrozenSet, List, Optional
 
-from .models import Finding, ScopePolicy
+from .models import Finding, ScopePolicy, Verdict
 from .graph import SurfaceGraph
 from .db import DB
 from . import toolrun, validation, dedup
-from .recon import planner, runner
+from .recon import adapters, planner, runner
 
 
 class Orchestrator:
@@ -25,7 +25,8 @@ class Orchestrator:
     def run_recon(self,
                   approvals: FrozenSet[str] = frozenset(),
                   include_active_scan: bool = False,
-                  max_steps: int = 100) -> Dict[str, List[str]]:
+                  max_steps: int = 100,
+                  timeout: int = 300) -> Dict[str, List[str]]:
         """Run initial + one expansion wave. Returns a summary of outcomes.
 
         approvals: tool names the human has approved for this run (e.g. {"nuclei"}).
@@ -39,30 +40,37 @@ class Orchestrator:
         while queue and executed < max_steps:
             step = queue.pop(0)
             key = (step.tool, step.target)
-            if key in seen:
-                continue
-            seen.add(key)
-            desc = "%s %s" % (step.tool, step.target)
-            try:
-                run, records = runner.execute_step(
-                    step, self.policy, self.graph, approved=(step.tool in approvals))
-                self.db.log_scope_decision(self.eng_id, run.scope_decision)
-                self.db.log_tool_run(self.eng_id, run.to_dict())
-                if run.stderr_ref == "tool not installed on PATH":
-                    summary["not_installed"].append(desc)
+            if key not in seen:
+                seen.add(key)
+                desc = "%s %s" % (step.tool, step.target)
+
+                # gate first, and log the scope decision for EVERY step (blocked
+                # or not) so the audit trail answers "why did/didn't it run this?"
+                spec = adapters.get(step.tool)
+                verdict, sd, _reason = toolrun.gate(step.target, spec.action_class, self.policy)
+                self.db.log_scope_decision(self.eng_id, sd.to_dict())
+
+                if verdict == Verdict.DENY:
+                    summary["blocked"].append(desc)
+                elif verdict == Verdict.REQUIRE_APPROVAL and step.tool not in approvals:
+                    summary["needs_approval"].append(desc)
                 else:
-                    summary["ran"].append(desc)
-                    if step.tool == "nuclei":
-                        summary["nuclei_hits"].extend(
-                            "%s @ %s" % (r["template_id"], r["matched_at"]) for r in records)
-                executed += 1
-            except toolrun.ScopeViolation:
-                summary["blocked"].append(desc)
-            except toolrun.ApprovalRequired:
-                summary["needs_approval"].append(desc)
+                    # permitted (or human-approved): execute
+                    run, records = runner.execute_step(
+                        step, self.policy, self.graph, approved=True, timeout=timeout)
+                    self.db.log_tool_run(self.eng_id, run.to_dict())
+                    if run.stderr_ref == "tool not installed on PATH":
+                        summary["not_installed"].append(desc)
+                    else:
+                        summary["ran"].append(desc)
+                        if step.tool == "nuclei":
+                            summary["nuclei_hits"].extend(
+                                "%s @ %s" % (r["template_id"], r["matched_at"]) for r in records)
+                    executed += 1
 
             # adaptive: whenever the queue drains, re-expand from what we now know,
-            # enqueuing only steps we have not already run (bounded by seen + max_steps)
+            # enqueuing only steps not already seen (bounded by seen + max_steps).
+            # This runs after EVERY step, including skipped ones.
             if not queue:
                 for s in planner.expand_plan(self.graph, include_active_scan):
                     if (s.tool, s.target) not in seen:
