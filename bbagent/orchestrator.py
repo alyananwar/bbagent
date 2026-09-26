@@ -33,11 +33,15 @@ class Orchestrator:
         summary = {"ran": [], "blocked": [], "needs_approval": [], "not_installed": [],
                    "nuclei_hits": []}
         queue = list(planner.initial_plan(self.policy))
-        expanded = False
+        seen = set()
         executed = 0
 
         while queue and executed < max_steps:
             step = queue.pop(0)
+            key = (step.tool, step.target)
+            if key in seen:
+                continue
+            seen.add(key)
             desc = "%s %s" % (step.tool, step.target)
             try:
                 run, records = runner.execute_step(
@@ -57,9 +61,12 @@ class Orchestrator:
             except toolrun.ApprovalRequired:
                 summary["needs_approval"].append(desc)
 
-            if not queue and not expanded:
-                queue.extend(planner.expand_plan(self.graph, include_active_scan))
-                expanded = True
+            # adaptive: whenever the queue drains, re-expand from what we now know,
+            # enqueuing only steps we have not already run (bounded by seen + max_steps)
+            if not queue:
+                for s in planner.expand_plan(self.graph, include_active_scan):
+                    if (s.tool, s.target) not in seen:
+                        queue.append(s)
         return summary
 
     def ingest_nuclei(self, records: List[dict], reproduce_fn=None) -> List[dict]:
