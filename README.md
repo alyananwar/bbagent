@@ -36,6 +36,9 @@ python3 -m bbagent.cli model             # roles, objects, authorization matrix
 python3 -m bbagent.cli coverage          # coverage bars + budget
 python3 -m bbagent.cli researchlog       # every decision, in order
 python3 -m bbagent.cli researchreport    # the deliverable: coverage + rejections + evidence
+
+# single-page app? hand it a capture of your own logged-in session
+python3 -m bbagent.cli browser capture.har --workflow "create feature flag"
 ```
 
 The report is the point. It shows what was modeled, which hypotheses were tested,
@@ -93,6 +96,12 @@ findings and a full rejection list is a real result.
   real stop condition.
 - **Research log** (`log.py`) — timestamp, agent, hypothesis, action,
   authorization, result, for every decision.
+- **Browser correlation** (`browser.py`) — imports a HAR or network capture from
+  the researcher's own browser session and turns UI actions into modeled
+  endpoints, with request-body keys a crawler never sees. Credentials are
+  classified (`cookie` / `bearer` / `api_token`) and their values discarded; every
+  captured URL is re-gated against scope before it is modeled. The tool never
+  drives a browser and never holds a session.
 
 ## Quick start
 
@@ -193,9 +202,8 @@ the *reference*; the value is read from the environment at request time.
 
 ## What's deliberately not here yet
 
-See `ROADMAP.md`. Short version: browser automation (UI-to-API correlation),
-Strix / Agentic-Bug-Hunter adapters as execution backends, platform scrapers, and
-running tools inside the sandbox container. The interfaces are shaped so they
+See `ROADMAP.md`. Short version: Strix / Agentic-Bug-Hunter adapters as execution
+backends, platform scrapers, and running tools inside the sandbox container. The interfaces are shaped so they
 drop in without touching the scope engine.
 
 ## Benchmarks
