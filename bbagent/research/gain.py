@@ -124,6 +124,57 @@ def from_scanner(records: List[Dict[str, Any]], model: AppModel) -> List[Hypothe
     return out
 
 
+def from_browser(requests, model: AppModel) -> List[Hypothesis]:
+    """Hypotheses that only a real browser session can suggest.
+
+    A crawler cannot see that three requests belong to one UI action. Once the
+    sequence is known, the interesting question is whether the server enforces it,
+    or whether step 3 can be invoked on its own.
+    """
+    out: List[Hypothesis] = []
+    by_workflow: Dict[str, List[Any]] = {}
+    for r in requests:
+        by_workflow.setdefault(r.workflow or "(unlabelled)", []).append(r)
+
+    for workflow, steps in by_workflow.items():
+        steps = sorted(steps, key=lambda r: r.order)
+        writes = [r for r in steps if r.method in ("POST", "PUT", "PATCH", "DELETE")]
+        # a multi-step flow whose later step changes state: can it be called alone?
+        if len(steps) > 1 and writes:
+            last = writes[-1]
+            out.append(Hypothesis(
+                id=make_id(Category.BROWSER_WORKFLOW, last.url, "direct-invocation"),
+                category=Category.BROWSER_WORKFLOW, target=last.url,
+                reasoning="the UI reaches %s %s only as step %d of workflow %r; if the "
+                          "server does not enforce the earlier steps, it can be invoked "
+                          "directly" % (last.method, last.url, last.order, workflow),
+                expected_observation="the endpoint accepts the request without the "
+                                     "preceding workflow steps having been performed",
+                # it changes state, so it never runs without explicit approval
+                authorization=ActionClass.D_IMPACTFUL.value,
+                experiment="", priority=0.5))
+        # an endpoint the UI only ever calls with a session cookie: does a scoped
+        # API token reach it too?
+        for r in steps:
+            if r.auth_kind == "cookie" and r.method == "GET":
+                out.append(Hypothesis(
+                    id=make_id(Category.AUTHZ, r.url, "cookie-vs-token"),
+                    category=Category.AUTHZ, target=r.url,
+                    reasoning="the UI calls %s with a session cookie only; a lower-scoped "
+                              "API token reaching the same data would mean the endpoint "
+                              "authorizes on authentication rather than on scope" % r.url,
+                    expected_observation="a reduced-scope token receives the same object data "
+                                         "as the session",
+                    authorization=ActionClass.B_LOW_ACTIVE.value,
+                    experiment="cross_account", priority=0.65))
+
+    best: Dict[str, Hypothesis] = {}
+    for h in out:
+        if h.id not in best or h.priority > best[h.id].priority:
+            best[h.id] = h
+    return sorted(best.values(), key=lambda h: -h.priority)
+
+
 def generate(model: AppModel) -> List[Hypothesis]:
     """Derive testable hypotheses from the application model.
 

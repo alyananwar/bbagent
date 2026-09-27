@@ -90,10 +90,10 @@ The pipeline used to stop when the scanners did. It does not any more.
       (`benchmarks/mock_app.py`, `benchmarks/run_benchmark.py`)
 - [x] Engagement research report: coverage, hypotheses tested and rejected with what
       each taught the model, validated evidence (`research/report.py`)
-- [ ] Browser automation + UI-to-API correlation — not built. There is no browser
-      driver in this repo, so there is nothing to correlate yet. When one lands, the
-      hook is `AppModel.add_endpoint` plus a `browser_workflow` coverage dimension
-      that already exists in `research/coverage.py`.
+- [x] Browser + API correlation (`research/browser.py`): HAR / capture import from the
+      researcher's own logged-in session, credentials classified and discarded,
+      workflow-tagged endpoints, scope re-gated at import, and hypotheses
+      (direct invocation, cookie vs token) that need a real session to suggest
 - [ ] LLM-driven hypothesis generation is advisory only; the deterministic
       generator carries the loop
 

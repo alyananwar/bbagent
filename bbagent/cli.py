@@ -415,6 +415,77 @@ def cmd_account(args) -> int:
     return 0
 
 
+def cmd_browser(args) -> int:
+    """Import a browser network capture and fold it into the application model."""
+    db = _db(args)
+    eng_id = _resolve_eng(db, args)
+    if not eng_id:
+        print("no engagement.", file=sys.stderr)
+        return 2
+    row, pol = _load_policy(db, eng_id)
+    if row["status"] == "awaiting_scope_confirmation":
+        print("scope not confirmed. run `bbagent confirm` first.", file=sys.stderr)
+        return 3
+    if not os.path.exists(args.capture):
+        print("capture file not found: %s" % args.capture, file=sys.stderr)
+        return 2
+    with open(args.capture, "r", encoding="utf-8") as f:
+        raw = f.read()
+
+    from .research import browser
+    from .research.appmodel import AppModel
+    from .research.hypothesis import HypothesisQueue
+    from .research.log import ResearchLog
+    from . import scope as scope_mod
+    from .research import gain
+
+    try:
+        requests = (browser.from_har(raw, args.workflow or "")
+                    if '"log"' in raw[:400] else
+                    browser.from_records(json.loads(raw), args.workflow or ""))
+    except ValueError as e:
+        print("could not parse capture (expected HAR or a JSON list): %s" % e, file=sys.stderr)
+        return 3
+
+    # the gate applies to captured traffic too: anything out of scope is dropped
+    # rather than modeled, so a stray tab cannot widen the engagement
+    kept, dropped = [], []
+    for r in requests:
+        decision = scope_mod.evaluate(r.url, pol).decision.value
+        (kept if decision == "in_scope" else dropped).append(r)
+
+    data = db.load_app_model(eng_id)
+    model = AppModel.from_dict(data) if data else AppModel()
+    browser.fold(model, kept)
+    db.save_app_model(eng_id, model.to_dict())
+
+    queue = HypothesisQueue(db, eng_id)
+    new = [h for h in gain.from_browser(kept, model)
+           if db.get_hypothesis(eng_id, h.id) is None]
+    queue.add_all(gain.from_browser(kept, model))
+
+    summary = browser.workflow_summary(kept)
+    ResearchLog(db, eng_id).record(
+        "browser", "imported network capture %s" % os.path.basename(args.capture),
+        result="%d in-scope requests kept, %d out-of-scope dropped, %d endpoints modeled, "
+               "%d new hypotheses" % (len(kept), len(dropped), len(model.endpoints), len(new)))
+
+    print("captured requests : %d  (kept %d in scope, dropped %d out of scope)"
+          % (len(requests), len(kept), len(dropped)))
+    print("workflows         : %s" % summary["workflows"])
+    print("methods           : %s" % summary["methods"])
+    print("auth kinds        : %s   (values never stored)" % summary["auth_kinds"])
+    print("object types      : %s" % ", ".join(summary["object_types"]) or "none")
+    print("endpoints modeled : %d" % len(model.endpoints))
+    print("new hypotheses    : %d" % len(new))
+    if dropped:
+        hosts = sorted({__import__("urllib.parse", fromlist=["urlparse"]).urlparse(r.url).hostname
+                        or "?" for r in dropped})
+        print("dropped hosts     : %s" % ", ".join(hosts))
+    db.close()
+    return 0
+
+
 def cmd_coverage(args) -> int:
     db = _db(args)
     eng_id = _resolve_eng(db, args)
@@ -571,6 +642,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--owns", action="append", help="object id this account legitimately owns")
     sp.add_argument("--engagement", type=int)
     sp.set_defaults(func=cmd_account)
+
+    sp = sub.add_parser("browser", help="import a browser network capture (HAR or JSON) "
+                                       "and correlate UI actions with API endpoints")
+    sp.add_argument("capture", help="path to a .har export or a JSON list of requests")
+    sp.add_argument("--workflow", help="label for the UI action you performed, "
+                                       "e.g. 'create feature flag'")
+    sp.add_argument("--engagement", type=int)
+    sp.set_defaults(func=cmd_browser)
 
     sp = sub.add_parser("coverage", help="research coverage bars and budget")
     sp.add_argument("--engagement", type=int)

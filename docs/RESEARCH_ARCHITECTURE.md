@@ -44,7 +44,7 @@ Parked, not terminal:
 | 12 | Account abstraction with auth state / token refs | `appmodel.py:Account`, `probe.py:account_headers` | `test_research.py::test_secrets_are_referenced_not_stored` |
 | 13 | Missing data raises `RESEARCHER_ACTION`, never fabricates | `research/blockers.py`, `investigate.py` | `test_loop.py::test_missing_second_account_becomes_a_blocker_not_an_exit` |
 | 14 | Resume automatically once the human provides it | `cli.py:cmd_resolve`, `BlockerQueue.resolve` | `test_loop.py::test_resolving_a_blocker_resumes_the_hypothesis` |
-| 15 | Browser + API correlation | **not built** — no browser driver in this repo. Hook points: `AppModel.add_endpoint` and the existing `browser_workflow` coverage dimension | n/a (reported as a coverage gap, not as covered) |
+| 15 | Browser + API correlation | `research/browser.py` — imports a HAR or a tool network capture from the researcher's logged-in session, drops static assets, folds endpoints (with request-body keys) into the model tagged by workflow, and re-gates every captured URL against scope. Credentials are classified and discarded, never stored. `gain.from_browser` adds direct-invocation and cookie-vs-token hypotheses | `test_browser.py` (8 tests, incl. `test_credentials_never_survive_the_import`, `test_capture_is_scope_gated_at_import`) |
 | 16 | Differential analysis on objects and permissions | `research/differential.py` (`compare`, `compare_permission_sets`) | `test_research.py::test_same_object_reached_by_two_identities_is_flagged`, `test_enforced_boundary_is_not_flagged` |
 | 17 | Separate validation stage (reproducible? relevant? benign?) | `loop.py:_do_validation`, `_benign_explanation` | `test_loop.py::test_public_endpoint_is_not_reported` |
 | 18 | Coverage bars per dimension | `research/coverage.py` | `test_research.py::test_coverage_reports_untouched_dimensions_honestly` |
@@ -74,6 +74,18 @@ Parked, not terminal:
 | CRITICAL | a pasted token was written to the `app_models` table in plaintext | `cmd_account` only validated the `Header=env:VAR` shape at *read* time, in `probe.account_headers` | `Account.__post_init__` refuses anything but `Header=env:VAR`, so every caller is guarded, not just the CLI; the CLI prints the correct command instead | `test_research.py::test_raw_secret_is_refused_before_it_can_be_stored`, `test_app_model_never_persists_a_raw_secret` |
 | HIGH | after the first blocker the engagement was bricked: `resolve` + `research` ran 0 iterations forever | `BLOCKED_ON_RESEARCHER` collapsed unconditionally into the terminal `HYPOTHESES_EXHAUSTED`, which was then persisted; `cmd_resolve` never cleared it | the collapse happens only when nothing is testable; `_load_state` re-enters a terminal state only if it is still true; `cmd_resolve` also resets the state | `test_loop.py::test_resolving_a_blocker_resumes_without_manual_state_surgery` |
 | MEDIUM | `ftp://`/`file://` targets could be judged in scope and handed to urllib's FTP/file handlers | `_classify_target` treated any `://` as a URL and never checked the scheme; `build_opener` always includes `FTPHandler`/`FileHandler`/`DataHandler` | non-web schemes classify as `other` and no host/domain/IP/URL rule matches them; the prober refuses any scheme but http(s) before gating | `test_research.py::test_non_web_schemes_are_never_in_scope_or_probed`, `test_repo_rules_still_match_after_the_scheme_guard` |
+
+## The browser session is an input, not a driver
+
+bbagent does not drive a browser and does not hold a session. The researcher
+performs a UI action in their own logged-in browser and hands the resulting network
+capture to `bbagent browser`. That keeps the boundary clean: no account creation, no
+login, no credential ever inside the tool, while still recovering the API surface a
+crawler cannot see in a single-page app.
+
+What the import keeps: method, URL, object type and id, status, request-body keys,
+the workflow label, and an auth *classification*. What it discards: every
+`Authorization`, `Cookie` and API-key value, and all request-body values.
 
 ## Scanner output is not a finding
 
