@@ -24,12 +24,22 @@ def _norm_host(host: str) -> str:
     return host.strip().lower().rstrip(".")
 
 
+WEB_SCHEMES = ("http", "https")
+
+
 def _classify_target(target: str) -> Tuple[str, str, Optional[int]]:
-    """Return (kind, host_or_ip, port). kind in {url, host, ip}."""
+    """Return (kind, host_or_ip, port). kind in {url, host, ip, other}.
+
+    "other" is anything that is not a web target: file://, ftp://, data: and so on.
+    No host/domain/IP rule can authorize one, because the whole action-class model
+    (and the prober) is built around HTTP semantics.
+    """
     t = target.strip()
     if "://" in t:
         p = urlparse(t)
         host = _norm_host(p.hostname or "")
+        if (p.scheme or "").lower() not in WEB_SCHEMES:
+            return "other", host, p.port
         return "url", host, p.port
     # host:port ?  (ponytail: bare IPv6 without brackets is not handled; use a URL)
     port = None
@@ -70,6 +80,10 @@ def _url_matches(target_url: str, rule_value: str) -> bool:
     rp = urlparse(rule_value if "://" in rule_value else "http://" + rule_value)
     if _norm_host(tp.hostname or "") != _norm_host(rp.hostname or ""):
         return False
+    # a rule that names a port authorizes only that port: http://host:8080/ must
+    # not put http://host:9999/ in scope (different service, same machine)
+    if rp.port is not None and tp.port != rp.port:
+        return False
     rule_path = rp.path or "/"
     target_path = tp.path or "/"
     return target_path == rule_path or target_path.startswith(rule_path.rstrip("/") + "/")
@@ -90,6 +104,13 @@ def _ip_in_rule(ip_obj, rule: ScopeRule) -> bool:
 
 def _match_rule(target: str, rule: ScopeRule) -> bool:
     kind, host, port = _classify_target(target)
+
+    if rule.kind == RuleKind.REPO:
+        return target.strip().rstrip("/").lower() == rule.value.strip().rstrip("/").lower()
+
+    # a non-web scheme is never authorized by a host, domain, IP or URL rule
+    if kind == "other":
+        return False
 
     if rule.kind == RuleKind.URL:
         if kind == "url":
@@ -119,9 +140,6 @@ def _match_rule(target: str, rule: ScopeRule) -> bool:
             return False
         r_host, _, r_port = rule.value.rpartition(":")
         return _norm_host(r_host) == host and r_port.isdigit() and int(r_port) == port
-
-    if rule.kind == RuleKind.REPO:
-        return target.strip().rstrip("/").lower() == rule.value.strip().rstrip("/").lower()
 
     return False
 

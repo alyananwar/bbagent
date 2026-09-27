@@ -62,6 +62,20 @@ def test_impactful_needs_approval_when_production_permitted():
     assert v == Verdict.REQUIRE_APPROVAL
 
 
+def test_technique_policy_converts_automation_into_a_manual_task():
+    pol = ScopePolicy(permissions=ProgramPermissions(active_testing_allowed=True))
+    verdict, reason = policy.technique_policy("template scan", pol)
+    assert verdict == policy.MANUAL_ONLY and "by hand" in reason
+
+
+def test_technique_policy_blocks_prohibited_techniques():
+    pol = ScopePolicy(permissions=ProgramPermissions(
+        active_testing_allowed=True, automated_scanning_allowed=True,
+        prohibited_techniques=["denial of service"]))
+    assert policy.technique_policy("denial of service", pol)[0] == policy.PROHIBITED
+    assert policy.technique_policy("authorization probe", pol)[0] == policy.AUTOMATION_ALLOWED
+
+
 if __name__ == "__main__":
     from _run import run_module
     import sys as _s

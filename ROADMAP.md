@@ -56,6 +56,47 @@ The deterministic spine. No live target interaction, no bundled exploits.
 - [x] Sandbox command builder: locked-down ephemeral container (`sandbox.py`)
 - [ ] Automated regression scoring across benchmark runs — manual for now
 
+## Phase 7 — research loop (DONE)
+
+The pipeline used to stop when the scanners did. It does not any more.
+
+- [x] Research state machine with explicit transitions; `NUCLEI_ZERO` transitions
+      into application modeling (`research/state.py`)
+- [x] Structured application model: users/roles/resources, endpoints as
+      object + required role + state change, authorization matrix
+      (`research/appmodel.py`)
+- [x] Persistent, prioritized hypothesis queue; rejections update the model
+      (`research/hypothesis.py`)
+- [x] Information-gain reasoning step written before every action
+      (`research/gain.py`)
+- [x] Account abstraction (auth state + secret reference) and `RESEARCHER_ACTION`
+      blockers that park work instead of ending it (`research/blockers.py`)
+- [x] Gated single-request prober for targeted investigation (`research/probe.py`)
+- [x] Differential analysis on authorization outcome + object identity, not text
+      (`research/differential.py`)
+- [x] Separate validation stage: reproducible? security-relevant? expected-behavior
+      explanation? (`research/loop.py`)
+- [x] Coverage bars per dimension + a research budget as the real stop condition
+      (`research/coverage.py`)
+- [x] Chronological research log of every decision (`research/log.py`)
+- [x] Explicit `automation_allowed` / `manual_only` / `prohibited` technique policy;
+      prohibited automation becomes a human task (`policy.py`)
+- [x] Persistence fixes: full tool output to the evidence store (no 8KB
+      truncation), graph in the DB after every step, legacy `graph_*.json`
+      imported on first run
+- [x] Tool-identity check (catches pip's `httpx` shadowing projectdiscovery's)
+      and failure recovery with an alternative path
+- [x] Benchmark target that is clean to scanners and broken for two identities
+      (`benchmarks/mock_app.py`, `benchmarks/run_benchmark.py`)
+- [x] Engagement research report: coverage, hypotheses tested and rejected with what
+      each taught the model, validated evidence (`research/report.py`)
+- [ ] Browser automation + UI-to-API correlation — not built. There is no browser
+      driver in this repo, so there is nothing to correlate yet. When one lands, the
+      hook is `AppModel.add_endpoint` plus a `browser_workflow` coverage dimension
+      that already exists in `research/coverage.py`.
+- [ ] LLM-driven hypothesis generation is advisory only; the deterministic
+      generator carries the loop
+
 ## Non-negotiables (hold across all phases)
 
 - Scope decisions are deterministic and separate from any LLM.
@@ -63,3 +104,8 @@ The deterministic spine. No live target interaction, no bundled exploits.
 - No autonomous submission or other consequential external action.
 - Evidence stays local and tamper-evident.
 - Reports never invent impact, severity, or results.
+- A clean run with a deep investigation report is a success. Manufactured
+  findings are a failure.
+- Missing data is a blocker, never an assumption.
+- A failed tool is diagnosed and recovered from, never silently read as
+  "nothing found".

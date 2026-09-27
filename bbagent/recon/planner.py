@@ -57,13 +57,17 @@ def expand_plan(graph: SurfaceGraph, include_active_scan: bool = False) -> List[
     """Next waves based on what recon has already found."""
     steps: List[PlanStep] = []
     for host in graph.by_type("subdomain") + graph.by_type("domain"):
-        if not graph.children(host):           # not yet probed
+        # "probed" is an explicit marker set by the runner. Checking for children
+        # instead was the bug: dnsx attaches IP children, so every resolved host
+        # counted as probed and httpx never ran.
+        if not (host.attrs or {}).get("probed_httpx"):
             steps.append(PlanStep("httpx", host.value, adapters.get("httpx").action_class,
                                   "probe discovered host for live web service"))
     for url in graph.by_type("url"):
-        steps.append(PlanStep("katana", url.value, adapters.get("katana").action_class,
-                              "crawl live URL for endpoints"))
-        if include_active_scan:
+        if not (url.attrs or {}).get("crawled"):
+            steps.append(PlanStep("katana", url.value, adapters.get("katana").action_class,
+                                  "crawl live URL for endpoints"))
+        if include_active_scan and not (url.attrs or {}).get("scanned"):
             steps.append(PlanStep("nuclei", url.value, adapters.get("nuclei").action_class,
                                   "template scan (security testing; will require approval)"))
     return steps

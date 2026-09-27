@@ -20,6 +20,7 @@ from typing import Optional
 from .models import ActionClass, FindingStatus
 from . import intake, scope as scope_mod, policy as policy_mod
 from .db import DB
+from .evidence import EvidenceStore
 from .graph import SurfaceGraph
 from .orchestrator import Orchestrator
 
@@ -57,21 +58,28 @@ def _load_policy(db: DB, eng_id: int):
     return row, pol
 
 
+def _store(args) -> EvidenceStore:
+    return EvidenceStore(os.path.join(_workspace(args), "evidence"))
+
+
 def _graph_path(args, eng_id: int) -> str:
     return os.path.join(_workspace(args), "graph_%d.json" % eng_id)
 
 
-def _load_graph(args, eng_id: int) -> SurfaceGraph:
+def _load_graph(args, eng_id: int, db: DB) -> SurfaceGraph:
+    """The DB owns the surface now. A graph_N.json from an older run is imported
+    once so nothing discovered before this change is lost."""
+    data = db.load_graph(eng_id)
+    if data:
+        return SurfaceGraph.from_dict(data)
     path = _graph_path(args, eng_id)
     if os.path.exists(path):
         with open(path) as f:
-            return SurfaceGraph.from_dict(json.load(f))
+            graph = SurfaceGraph.from_dict(json.load(f))
+        db.save_graph(eng_id, graph.to_dict())
+        print("imported %d nodes from %s into the database" % (len(graph.nodes), path))
+        return graph
     return SurfaceGraph()
-
-
-def _save_graph(args, eng_id: int, graph: SurfaceGraph) -> None:
-    with open(_graph_path(args, eng_id), "w") as f:
-        json.dump(graph.to_dict(), f, indent=2)
 
 
 def cmd_import(args) -> int:
@@ -109,19 +117,22 @@ def cmd_recon(args) -> int:
     if row["status"] == "awaiting_scope_confirmation":
         print("scope not confirmed. run `bbagent confirm` first.", file=sys.stderr)
         return 3
-    graph = _load_graph(args, eng_id)
-    orch = Orchestrator(db, eng_id, pol, graph)
+    graph = _load_graph(args, eng_id, db)
+    orch = Orchestrator(db, eng_id, pol, graph, store=_store(args))
     approvals = frozenset(args.approve or [])
-    summary = orch.run_recon(approvals=approvals, include_active_scan=args.active)
-    _save_graph(args, eng_id, orch.graph)
-    for key in ("ran", "not_installed", "blocked", "needs_approval", "nuclei_hits"):
+    summary = orch.run_recon(approvals=approvals, include_active_scan=args.active,
+                             timeout=args.tool_timeout)
+    for key in ("ran", "recovered", "failed", "not_installed", "blocked",
+                "needs_approval", "nuclei_hits"):
         items = summary.get(key, [])
         print("\n%s (%d):" % (key.upper(), len(items)))
         for it in items:
             print("  %s" % it)
     if summary.get("needs_approval"):
         print("\nTo run an approval-gated tool: bbagent recon --approve nuclei --active")
-    print("\ngraph: %d nodes saved to %s" % (len(orch.graph.nodes), _graph_path(args, eng_id)))
+    print("\ngraph: %d nodes persisted to the database (engagement #%d)"
+          % (len(orch.graph.nodes), eng_id))
+    print("recon is only the observation phase. For the full research loop: bbagent research")
     db.close()
     return 0
 
@@ -249,6 +260,256 @@ def cmd_approve(args) -> int:
     return 0 if ok else 2
 
 
+def _loop(args, db: DB, eng_id: int, pol):
+    from .research.coverage import Budget
+    from .research.loop import ResearchLoop
+    budget = Budget(max_tool_calls=args.max_tool_calls, max_seconds=args.max_seconds,
+                    max_investigations=args.max_investigations)
+    _load_graph(args, eng_id, db)          # migrate a legacy graph file if present
+    return ResearchLoop(db, eng_id, pol, store=_store(args), budget=budget,
+                        approvals=frozenset(args.approve or []),
+                        approve_investigation=args.approve_investigation,
+                        include_active_scan=args.active,
+                        tool_timeout=args.tool_timeout)
+
+
+def cmd_research(args) -> int:
+    db = _db(args)
+    eng_id = _resolve_eng(db, args)
+    if not eng_id:
+        print("no engagement.", file=sys.stderr)
+        return 2
+    row, pol = _load_policy(db, eng_id)
+    if row["status"] == "awaiting_scope_confirmation":
+        print("scope not confirmed. run `bbagent confirm` first.", file=sys.stderr)
+        return 3
+    loop = _loop(args, db, eng_id, pol)
+    summary = loop.run(max_iterations=args.max_iterations)
+
+    print("\nFINAL STATE: %s   (%d loop iterations)" % (summary["state"], summary["iterations"]))
+    print("\nHYPOTHESES: " + ", ".join("%s=%d" % (k, v) for k, v in summary["hypotheses"].items() if v))
+    print("\n" + summary["coverage"])
+    if summary["blockers"]:
+        print("\nRESEARCHER ACTION REQUIRED (%d):" % len(summary["blockers"]))
+        for b in summary["blockers"]:
+            print("  [%s] %s\n      why: %s\n      how: %s"
+                  % (b["id"], b["what_is_needed"], b["reasoning"], b["how_to_provide"]))
+        print("\n  Resolve one, then re-run `bbagent research` -- the loop resumes where it parked.")
+    print("\nfindings: bbagent findings   |   log: bbagent researchlog   |   "
+          "hypotheses: bbagent hypotheses")
+    db.close()
+    return 0
+
+
+def cmd_hypotheses(args) -> int:
+    db = _db(args)
+    eng_id = _resolve_eng(db, args)
+    if not eng_id:
+        print("no engagement.", file=sys.stderr)
+        return 2
+    from .research.hypothesis import HypothesisQueue
+    q = HypothesisQueue(db, eng_id)
+    rows = q.all()
+    if not rows:
+        print("no hypotheses yet. run `bbagent research`.")
+        return 0
+    for h in sorted(rows, key=lambda x: (x.status.value, -x.priority)):
+        print("%-22s %-10s p=%.2f  %-14s %s" % (h.id, h.status.value, h.priority,
+                                                h.category.value, h.target))
+        print("     reasoning: %s" % h.reasoning)
+        print("     expected : %s" % h.expected_observation)
+        if h.observed:
+            print("     observed : %s" % h.observed)
+        if h.learned:
+            print("     learned  : %s" % h.learned)
+    db.close()
+    return 0
+
+
+def cmd_blockers(args) -> int:
+    db = _db(args)
+    eng_id = _resolve_eng(db, args)
+    if not eng_id:
+        print("no engagement.", file=sys.stderr)
+        return 2
+    from .research.blockers import BlockerQueue
+    for b in BlockerQueue(db, eng_id).all():
+        print("%s %-22s %s" % ("[open]  " if not b.resolved else "[closed]", b.id, b.what_is_needed))
+        print("     why: %s" % b.reasoning)
+        if b.how_to_provide:
+            print("     how: %s" % b.how_to_provide)
+        if b.resolved:
+            print("     resolution: %s" % b.resolution)
+    db.close()
+    return 0
+
+
+def cmd_resolve(args) -> int:
+    db = _db(args)
+    eng_id = _resolve_eng(db, args)
+    if not eng_id:
+        print("no engagement.", file=sys.stderr)
+        return 2
+    from .research.blockers import BlockerQueue
+    from .research.hypothesis import HypothesisQueue, HypothesisStatus, replace
+    ident = args.id
+    bq = BlockerQueue(db, eng_id)
+    b = bq.resolve(ident, args.note or "provided by researcher")
+    hq = HypothesisQueue(db, eng_id)
+    reopened = []
+    targets = [h for h in hq.all()
+               if h.status == HypothesisStatus.REQUIRES_HUMAN_ACTION
+               and (h.id == ident or (b is not None and h.id == b.hypothesis_id))]
+    for h in targets:
+        hq.update(replace(h, status=HypothesisStatus.UNTESTED,
+                          learned=(h.learned + " | researcher input: " + (args.note or "")).strip(" |")))
+        reopened.append(h.id)
+    if b is None and not reopened:
+        print("no blocker or hypothesis with id %r." % ident, file=sys.stderr)
+        return 2
+    if b is not None:
+        print("blocker %s closed." % b.id)
+    for hid in reopened:
+        print("hypothesis %s back in the queue as untested." % hid)
+    if reopened:
+        from .research.state import ResearchState
+        db.set_research_state(eng_id, ResearchState.HYPOTHESIS_GENERATED.value,
+                              {"reason": "researcher resolved %s" % ident})
+    print("re-run `bbagent research` to continue from here.")
+    db.close()
+    return 0
+
+
+def cmd_account(args) -> int:
+    db = _db(args)
+    eng_id = _resolve_eng(db, args)
+    if not eng_id:
+        print("no engagement.", file=sys.stderr)
+        return 2
+    row, pol = _load_policy(db, eng_id)
+    from .research.appmodel import Account, AppModel, UnsafeTokenRef
+    data = db.load_app_model(eng_id)
+    model = AppModel.from_dict(data) if data else AppModel()
+    try:
+        acct = Account(label=args.label, role=args.role, token_ref=args.token or "",
+                       identity=args.identity or "",
+                       auth_state="credentials_provided" if args.token else "none",
+                       owns=args.owns or [])
+    except UnsafeTokenRef as e:
+        print("refusing to store that token: %s" % e, file=sys.stderr)
+        print("  export BB_TOKEN_%s='<the secret>'\n"
+              "  bbagent account %s --role %s --token 'Authorization=env:BB_TOKEN_%s'"
+              % (args.label, args.label, args.role, args.label), file=sys.stderr)
+        db.close()
+        return 4
+    model.add_account(acct)
+    db.save_app_model(eng_id, model.to_dict())
+    print("account %r registered: role=%s auth_state=%s token_ref=%s"
+          % (acct.label, acct.role, acct.auth_state, acct.token_ref or "(none)"))
+    if args.token and "=env:" in args.token:
+        var = args.token.split("=env:", 1)[1]
+        print("the secret itself stays in $%s and is never written to the workspace." % var)
+        if not os.environ.get(var):
+            print("warning: $%s is not set in this shell yet." % var, file=sys.stderr)
+    db.close()
+    return 0
+
+
+def cmd_coverage(args) -> int:
+    db = _db(args)
+    eng_id = _resolve_eng(db, args)
+    if not eng_id:
+        print("no engagement.", file=sys.stderr)
+        return 2
+    row, pol = _load_policy(db, eng_id)
+    from .research.coverage import render
+    from .research.hypothesis import HypothesisQueue
+    from .research.loop import ResearchLoop
+    loop = ResearchLoop(db, eng_id, pol, store=_store(args))
+    print(render(HypothesisQueue(db, eng_id).all(), None, loop.surface_counts()))
+    print("\nstate: %s" % loop.state.value)
+    db.close()
+    return 0
+
+
+def cmd_researchlog(args) -> int:
+    db = _db(args)
+    eng_id = _resolve_eng(db, args)
+    if not eng_id:
+        print("no engagement.", file=sys.stderr)
+        return 2
+    from .research.log import ResearchLog
+    out = ResearchLog(db, eng_id).render(limit=args.limit)
+    print(out or "research log is empty. run `bbagent research`.")
+    db.close()
+    return 0
+
+
+def cmd_model(args) -> int:
+    db = _db(args)
+    eng_id = _resolve_eng(db, args)
+    if not eng_id:
+        print("no engagement.", file=sys.stderr)
+        return 2
+    from .research.appmodel import AppModel
+    data = db.load_app_model(eng_id)
+    if not data:
+        print("no application model yet. run `bbagent research`.")
+        return 0
+    m = AppModel.from_dict(data)
+    print("ACCOUNTS:")
+    for a in m.accounts.values():
+        print("  %-10s role=%-10s auth=%-22s %s" % (a.label, a.role, a.auth_state,
+                                                    a.token_ref or ""))
+    print("\nOBJECT TYPES:")
+    for r in m.resources.values():
+        print("  %-16s owner_scoped=%s ids=%s" % (r.name, r.owner_scoped, r.observed_ids[:5]))
+    print("\nENDPOINTS (%d):" % len(m.endpoints))
+    for ep in list(m.endpoints.values())[:args.limit]:
+        print("  %-42s object=%-12s id=%-8s role=%-10s state_changing=%s"
+              % (ep.key[:42], ep.object_type, ep.object_id, ep.requires_role, ep.changes_state))
+        for note in ep.notes:
+            print("      learned: %s" % note)
+    print("\nAUTHORIZATION MATRIX (%d observed):" % len(m.matrix))
+    for k, v in list(m.matrix.items())[:args.limit]:
+        role, key = k.split("|", 1)
+        print("  %-10s %-46s %s" % (role, key[:46], v))
+    db.close()
+    return 0
+
+
+def cmd_researchreport(args) -> int:
+    db = _db(args)
+    eng_id = _resolve_eng(db, args)
+    if not eng_id:
+        print("no engagement.", file=sys.stderr)
+        return 2
+    row, pol = _load_policy(db, eng_id)
+    from .research import report as research_report
+    from .research.blockers import BlockerQueue
+    from .research.hypothesis import HypothesisQueue
+    from .research.log import ResearchLog
+    from .research.loop import ResearchLoop
+    loop = ResearchLoop(db, eng_id, pol, store=_store(args))
+    findings = [json.loads(f["data"]) for f in db.list_findings(eng_id)]
+    text = research_report.render(
+        program=json.loads(row["data"]).get("program", ""),
+        state=loop.state.value,
+        hypotheses=HypothesisQueue(db, eng_id).all(),
+        findings=findings,
+        blockers=BlockerQueue(db, eng_id).open(),
+        surface=loop.surface_counts(),
+        log_tail=ResearchLog(db, eng_id).render(limit=args.log_lines))
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(text)
+        print("wrote %s" % args.out)
+    else:
+        print(text)
+    db.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bbagent", description="authorized bug bounty research core")
     p.add_argument("--workspace", help="state directory (default ./.bbagent)")
@@ -271,7 +532,66 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--engagement", type=int)
     sp.add_argument("--approve", action="append", help="approve an action-gated tool, e.g. --approve nuclei")
     sp.add_argument("--active", action="store_true", help="include active security scanning steps (still gated)")
+    sp.add_argument("--tool-timeout", type=int, default=300, help="per-tool timeout in seconds")
     sp.set_defaults(func=cmd_recon)
+
+    sp = sub.add_parser("research", help="run the full research loop (recon -> model -> "
+                                         "hypothesize -> investigate -> validate)")
+    sp.add_argument("--engagement", type=int)
+    sp.add_argument("--approve", action="append", help="approve a gated recon tool, e.g. nuclei")
+    sp.add_argument("--active", action="store_true", help="include active scanning steps")
+    sp.add_argument("--approve-investigation", action="store_true",
+                    help="approve approval-gated investigations (incl. state-changing tests)")
+    sp.add_argument("--max-tool-calls", type=int, default=200)
+    sp.add_argument("--max-investigations", type=int, default=100)
+    sp.add_argument("--max-seconds", type=int, default=1800)
+    sp.add_argument("--max-iterations", type=int, default=200)
+    sp.add_argument("--tool-timeout", type=int, default=300, help="per-tool timeout in seconds")
+    sp.set_defaults(func=cmd_research)
+
+    sp = sub.add_parser("hypotheses", help="list hypotheses and what each one taught us")
+    sp.add_argument("--engagement", type=int)
+    sp.set_defaults(func=cmd_hypotheses)
+
+    sp = sub.add_parser("blockers", help="list researcher-action blockers")
+    sp.add_argument("--engagement", type=int)
+    sp.set_defaults(func=cmd_blockers)
+
+    sp = sub.add_parser("resolve", help="close a blocker (or reopen a parked hypothesis) by id")
+    sp.add_argument("id", help="blocker id or hypothesis id")
+    sp.add_argument("--note", help="what you provided / what you observed")
+    sp.add_argument("--engagement", type=int)
+    sp.set_defaults(func=cmd_resolve)
+
+    sp = sub.add_parser("account", help="register a researcher-controlled test account")
+    sp.add_argument("label", help="short label, e.g. A or B")
+    sp.add_argument("--role", default="user")
+    sp.add_argument("--token", help="auth material reference, e.g. 'Authorization=env:BB_TOKEN_B'")
+    sp.add_argument("--identity", help="the user id/email this account is")
+    sp.add_argument("--owns", action="append", help="object id this account legitimately owns")
+    sp.add_argument("--engagement", type=int)
+    sp.set_defaults(func=cmd_account)
+
+    sp = sub.add_parser("coverage", help="research coverage bars and budget")
+    sp.add_argument("--engagement", type=int)
+    sp.set_defaults(func=cmd_coverage)
+
+    sp = sub.add_parser("researchlog", help="chronological decision log")
+    sp.add_argument("--limit", type=int)
+    sp.add_argument("--engagement", type=int)
+    sp.set_defaults(func=cmd_researchlog)
+
+    sp = sub.add_parser("researchreport", help="full engagement report: coverage, "
+                                              "hypotheses tested and rejected, validated evidence")
+    sp.add_argument("--out", help="write markdown to this file instead of stdout")
+    sp.add_argument("--log-lines", type=int, default=25)
+    sp.add_argument("--engagement", type=int)
+    sp.set_defaults(func=cmd_researchreport)
+
+    sp = sub.add_parser("model", help="show the application model (roles, objects, matrix)")
+    sp.add_argument("--limit", type=int, default=40)
+    sp.add_argument("--engagement", type=int)
+    sp.set_defaults(func=cmd_model)
 
     sp = sub.add_parser("scope", help="show parsed scope for an engagement")
     sp.add_argument("--engagement", type=int)

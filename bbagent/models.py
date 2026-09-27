@@ -156,13 +156,21 @@ class ToolRun:
     scope_decision: Dict[str, Any]
     verdict: str
     exit_code: Optional[int] = None
-    stdout_ref: str = ""
+    stdout_ref: str = ""          # evidence-store ref (or a bounded preview)
+    stdout_sha256: str = ""
+    stdout_bytes: int = 0
     stderr_ref: str = ""
     started_at: str = field(default_factory=_now)
     finished_at: str = ""
+    # Full stdout, in memory only. Deliberately excluded from to_dict(): the DB
+    # row stays small while parsers get every byte (truncating here used to lose
+    # most of a katana crawl).
+    stdout: str = field(default="", repr=False, compare=False)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d.pop("stdout", None)
+        return d
 
 
 # --- findings / evidence ---------------------------------------------------
