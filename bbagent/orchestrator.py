@@ -16,11 +16,14 @@ from .recon import adapters, planner, runner
 
 class Orchestrator:
     def __init__(self, db: DB, engagement_id: int, policy: ScopePolicy,
-                 graph: Optional[SurfaceGraph] = None):
+                 graph: Optional[SurfaceGraph] = None, store=None,
+                 fallback_prober=None):
         self.db = db
         self.eng_id = engagement_id
         self.policy = policy
         self.graph = graph or SurfaceGraph()
+        self.store = store                  # EvidenceStore: full tool output lands here
+        self.fallback_prober = fallback_prober   # used when a recon tool is unusable
 
     def run_recon(self,
                   approvals: FrozenSet[str] = frozenset(),
@@ -32,7 +35,8 @@ class Orchestrator:
         approvals: tool names the human has approved for this run (e.g. {"nuclei"}).
         """
         summary = {"ran": [], "blocked": [], "needs_approval": [], "not_installed": [],
-                   "nuclei_hits": []}
+                   "nuclei_hits": [], "nuclei_records": [], "failed": [], "recovered": [],
+                   "records": 0}
         queue = list(planner.initial_plan(self.policy))
         seen = set()
         executed = 0
@@ -57,15 +61,28 @@ class Orchestrator:
                 else:
                     # permitted (or human-approved): execute
                     run, records = runner.execute_step(
-                        step, self.policy, self.graph, approved=True, timeout=timeout)
+                        step, self.policy, self.graph, approved=True, timeout=timeout,
+                        store=self.store)
                     self.db.log_tool_run(self.eng_id, run.to_dict())
-                    if run.stderr_ref == "tool not installed on PATH":
+                    summary["records"] += len(records)
+                    if run.stderr_ref == toolrun.NOT_INSTALLED:
                         summary["not_installed"].append(desc)
+                        self._recover(step, summary)
+                    elif run.exit_code not in (0, None) or (
+                            run.exit_code is None and not run.stdout):
+                        # a failed tool is diagnosed and recovered from, never
+                        # silently treated as "nothing found"
+                        summary["failed"].append("%s: %s" % (desc, run.stderr_ref[:200]))
+                        self._recover(step, summary)
                     else:
                         summary["ran"].append(desc)
                         if step.tool == "nuclei":
                             summary["nuclei_hits"].extend(
                                 "%s @ %s" % (r["template_id"], r["matched_at"]) for r in records)
+                            summary["nuclei_records"].extend(records)
+                    # persist the surface after EVERY step: a crash used to discard
+                    # the whole graph because it was only written at the end
+                    self.db.save_graph(self.eng_id, self.graph.to_dict())
                     executed += 1
 
             # adaptive: whenever the queue drains, re-expand from what we now know,
@@ -76,6 +93,30 @@ class Orchestrator:
                     if (s.tool, s.target) not in seen:
                         queue.append(s)
         return summary
+
+    def _recover(self, step, summary) -> None:
+        """Alternative path when a recon tool is missing or broken.
+
+        Only httpx has one today: a direct HTTP request finds the live web service
+        the probe step existed to find. Everything else is reported as a gap rather
+        than pretended away.
+        """
+        if step.tool != "httpx" or self.fallback_prober is None:
+            return
+        host = step.target
+        for url in ("https://%s/" % host, "http://%s/" % host):
+            try:
+                obs = self.fallback_prober.request(url, "GET")
+            except Exception:                        # noqa: BLE001 - gate refusal or network
+                continue
+            if obs.status is not None:
+                runner.fold(self.graph, "httpx",
+                            [{"url": url, "status": obs.status, "tech": [], "title": "",
+                              "webserver": ""}], host)
+                runner.mark_probed(self.graph, "httpx", host)
+                summary["recovered"].append("httpx %s -> direct probe found %s (%s)"
+                                            % (host, url, obs.status))
+                return
 
     def ingest_nuclei(self, records: List[dict], reproduce_fn=None) -> List[dict]:
         """Turn nuclei records into validated finding drafts and store them."""

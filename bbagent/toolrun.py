@@ -27,19 +27,55 @@ class ApprovalRequired(Exception):
         self.reason = verdict_reason
 
 
-def _tool_version(tool: str) -> str:
-    path = shutil.which(tool)
-    if not path:
-        return "not-installed"
+NOT_INSTALLED = "tool not installed on PATH"
+
+
+def _version_text(tool: str) -> str:
+    """Full version/banner output, used for both the version string and the
+    identity check. Returns "" when nothing could be read."""
+    if not shutil.which(tool):
+        return ""
     for flag in ("-version", "--version", "-V"):
         try:
             out = subprocess.run([tool, flag], capture_output=True, text=True, timeout=10)
-            text = (out.stdout or out.stderr).strip().splitlines()
+            text = ((out.stdout or "") + "\n" + (out.stderr or "")).strip()
             if text:
-                return text[0][:120]
+                return text[:2000]
         except Exception:
             continue
-    return "unknown"
+    return ""
+
+
+def _tool_version(tool: str) -> str:
+    text = _version_text(tool)
+    if not text:
+        return "not-installed" if not shutil.which(tool) else "unknown"
+    for line in text.splitlines():
+        line = line.strip()
+        if line and "projectdiscovery.io" not in line and not line.startswith(("_", "/", "\\", "|")):
+            return line[:120]
+    return text.splitlines()[0][:120]
+
+
+def wrong_binary(tool: str, identity_hint: str) -> Optional[str]:
+    """Confirm the binary on PATH is the tool we think it is.
+
+    Real case this catches: `httpx` on PATH being the Python HTTP client instead
+    of projectdiscovery's httpx. Both exit 0, one produces useless output, and the
+    run looks successful while the pipeline silently starves downstream steps.
+    Returns a diagnosis string on mismatch, None when it looks right.
+    """
+    if not identity_hint or not shutil.which(tool):
+        return None
+    text = _version_text(tool).lower()
+    if not text:
+        return None
+    for hint in [h.strip().lower() for h in identity_hint.split("|") if h.strip()]:
+        if hint in text:
+            return None
+    return ("%s on PATH (%s) does not look like the expected tool: version output "
+            "has none of %r. Fix PATH or pass the right binary."
+            % (tool, shutil.which(tool), identity_hint))
 
 
 def gate(target: str, action_class: ActionClass, policy_obj: ScopePolicy):
@@ -55,12 +91,19 @@ def run(tool: str,
         action_class: ActionClass,
         policy_obj: ScopePolicy,
         approved: bool = False,
-        timeout: int = 300) -> ToolRun:
+        timeout: int = 300,
+        store=None,
+        identity_hint: str = "") -> ToolRun:
     """Run an external tool against a target, gated by scope + policy.
 
     - Verdict DENY  -> ScopeViolation, tool never executes.
     - Verdict REQUIRE_APPROVAL and not approved -> ApprovalRequired.
     - Verdict ALLOW (or approved) -> execute and record.
+
+    store: an EvidenceStore. When given, the FULL stdout is written to it
+    content-addressed and stdout_ref points at that object. Output is never
+    truncated before the parser sees it (run.stdout always holds all of it):
+    truncating here was silently dropping most crawled endpoints.
     """
     verdict, sd, reason = gate(target, action_class, policy_obj)
 
@@ -76,17 +119,39 @@ def run(tool: str,
 
     if shutil.which(tool) is None:
         run_rec.exit_code = None
-        run_rec.stderr_ref = "tool not installed on PATH"
+        run_rec.stderr_ref = NOT_INSTALLED
+        run_rec.finished_at = datetime.now(timezone.utc).isoformat()
+        return run_rec
+
+    mismatch = wrong_binary(tool, identity_hint)
+    if mismatch:
+        run_rec.exit_code = None
+        run_rec.stderr_ref = mismatch
         run_rec.finished_at = datetime.now(timezone.utc).isoformat()
         return run_rec
 
     try:
         proc = subprocess.run([tool, *args], capture_output=True, text=True, timeout=timeout)
         run_rec.exit_code = proc.returncode
-        run_rec.stdout_ref = proc.stdout[-8000:]
-        run_rec.stderr_ref = proc.stderr[-2000:]
-    except subprocess.TimeoutExpired:
+        run_rec.stdout = proc.stdout or ""
+        run_rec.stderr_ref = (proc.stderr or "")[-2000:]
+    except subprocess.TimeoutExpired as e:
         run_rec.exit_code = None
-        run_rec.stderr_ref = "timeout after %ss" % timeout
+        # keep whatever the tool emitted before the timeout instead of discarding it
+        partial = e.stdout or ""
+        run_rec.stdout = partial.decode("utf-8", "replace") if isinstance(partial, bytes) else partial
+        run_rec.stderr_ref = "timeout after %ss (kept %d bytes of partial output)" % (
+            timeout, len(run_rec.stdout))
+
+    run_rec.stdout_bytes = len(run_rec.stdout)
+    if run_rec.stdout:
+        if store is not None:
+            ev = store.add("tool_output", run_rec.stdout)
+            run_rec.stdout_ref = ev.ref
+            run_rec.stdout_sha256 = ev.sha256
+        else:
+            # no store: keep a bounded preview in the record, but run.stdout above
+            # still carries everything for the parser in this process
+            run_rec.stdout_ref = run_rec.stdout[:8000]
     run_rec.finished_at = datetime.now(timezone.utc).isoformat()
     return run_rec

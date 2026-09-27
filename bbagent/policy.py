@@ -17,6 +17,16 @@ from typing import Tuple
 
 from .models import ActionClass, ScopeDecisionKind, ScopePolicy, Verdict
 
+# Technique policy. Programs restrict HOW a thing may be done, not only whether:
+# "no automated scanning" usually means a human may still test it by hand. We
+# make that explicit instead of quietly ignoring it or quietly stopping.
+AUTOMATION_ALLOWED = "automation_allowed"
+MANUAL_ONLY = "manual_only"
+PROHIBITED = "prohibited"
+
+# techniques that are automation by nature
+_AUTOMATED_TECHNIQUES = ("scan", "fuzz", "brute", "crawl", "spray", "enumerat", "flood")
+
 
 def decide(action_class: ActionClass,
            scope_decision: ScopeDecisionKind,
@@ -54,3 +64,27 @@ def decide(action_class: ActionClass,
         return Verdict.DENY, "impactful action defaults to deny unless program permits"
 
     return Verdict.DENY, "unclassified action denied by default"
+
+
+def technique_policy(technique: str, policy: ScopePolicy) -> Tuple[str, str]:
+    """Classify a named technique against the program's own rules.
+
+    Returns (AUTOMATION_ALLOWED | MANUAL_ONLY | PROHIBITED, reason). A
+    manual_only technique is not a dead end: callers convert it into a human
+    task (a RESEARCHER_ACTION blocker) rather than either skipping it silently or
+    running it anyway.
+    """
+    t = (technique or "").strip().lower()
+    perms = policy.permissions
+    for banned in perms.prohibited_techniques:
+        b = banned.strip().lower()
+        if b and (b in t or t in b):
+            return PROHIBITED, "program prohibits %r" % banned
+    looks_automated = any(k in t for k in _AUTOMATED_TECHNIQUES)
+    if looks_automated and not perms.automated_scanning_allowed:
+        return MANUAL_ONLY, ("%r is automated by nature and the program has not "
+                             "permitted automated scanning; a human may still do it "
+                             "by hand" % technique)
+    if not perms.active_testing_allowed and not perms.automated_scanning_allowed:
+        return MANUAL_ONLY, "program has not confirmed active testing; hand off to a human"
+    return AUTOMATION_ALLOWED, "permitted by program rules"

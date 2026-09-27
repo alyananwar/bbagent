@@ -9,6 +9,40 @@ and only after a target passes the scope engine.
 The whole design assumes one thing: a target is authorized only when the
 program's own scope says so. Being listed on a platform means nothing by itself.
 
+## How it works
+
+Recon is the first phase, not the engagement. The loop is a state machine:
+
+```
+SCOPE_VERIFIED -> RECON -> APPLICATION_MODELING -> HYPOTHESIS_GENERATED
+                              ^                          |
+                              |                          v
+                     (learn from result) <- VALIDATION <- INVESTIGATION
+```
+
+A scan that matches zero templates transitions into application modeling. It is
+not an exit. The only three ways an engagement ends are: the research budget is
+spent, no hypothesis is worth testing against the current model, or authorization
+says stop. Anything the agent needs from a human (a second test account, a
+session token, permission for a manual-only technique) becomes a blocker: that
+hypothesis parks, the rest of the research continues, and `bbagent resolve` puts
+it back in the queue.
+
+```bash
+python3 -m bbagent.cli research          # the full loop
+python3 -m bbagent.cli hypotheses        # what was tested, what it taught us
+python3 -m bbagent.cli blockers          # what the agent needs from you
+python3 -m bbagent.cli model             # roles, objects, authorization matrix
+python3 -m bbagent.cli coverage          # coverage bars + budget
+python3 -m bbagent.cli researchlog       # every decision, in order
+python3 -m bbagent.cli researchreport    # the deliverable: coverage + rejections + evidence
+```
+
+The report is the point. It shows what was modeled, which hypotheses were tested,
+which were rejected and what each rejection taught the model, what is validated
+with recorded evidence, and what is still waiting on a human. A run with no
+findings and a full rejection list is a real result.
+
 ## What's built
 
 - **Scope engine** (`scope.py`) — deterministic, no LLM. Handles domains,
@@ -32,6 +66,33 @@ program's own scope says so. Being listed on a platform means nothing by itself.
 - **Report** (`report.py`) — submission-ready markdown that refuses to invent
   missing fields.
 - **CLI** (`cli.py`).
+
+### The research layer (`bbagent/research/`)
+
+- **State machine** (`state.py`) — explicit states and legal transitions. Zero
+  scanner findings transitions to deeper research; only budget exhaustion,
+  hypothesis exhaustion, or an authorization stop are terminal.
+- **Application model** (`appmodel.py`) — an endpoint operates on an object,
+  requires a role, and may change state. Plus researcher-controlled accounts
+  (auth state + a *reference* to a secret, never the secret) and an
+  authorization matrix of `(role, endpoint) -> allowed | denied | unknown`.
+- **Hypothesis engine** (`hypothesis.py`) — persistent, prioritized queue. Each
+  hypothesis carries reasoning, the expected observation, the action class its
+  test needs, and, once closed, what it taught the model. Rejections are kept.
+- **Information gain** (`gain.py`) — the written reasoning step (what we know,
+  what is missing, which hypothesis this tests, the lowest-impact evidence path)
+  and deterministic hypothesis generation from the model.
+- **Investigation** (`investigate.py`, `probe.py`) — one narrow, gated request
+  per question, made as a chosen identity, with the response stored as evidence.
+- **Differential analysis** (`differential.py`) — compares two identities
+  structurally (authorization outcome + object ids), not as text diffs.
+- **Blockers** (`blockers.py`) — `RESEARCHER_ACTION` items with the reasoning and
+  the exact command to resolve them.
+- **Coverage and budget** (`coverage.py`) — per-dimension coverage bars for auth,
+  authorization, API, business logic, and browser workflows; the budget is the
+  real stop condition.
+- **Research log** (`log.py`) — timestamp, agent, hypothesis, action,
+  authorization, result, for every decision.
 
 ## Quick start
 
@@ -58,6 +119,16 @@ python3 -m bbagent.cli check evil.other.com --class B   # denied (unknown)
 # 5. run gated recon (builds the attack-surface graph)
 python3 -m bbagent.cli recon                 # passive + low-impact
 python3 -m bbagent.cli recon --active --approve nuclei   # active scan, approved
+
+# 5b. register the test identities the research loop compares
+export BB_TOKEN_A=... BB_TOKEN_B=...
+python3 -m bbagent.cli account A --role user --token 'Authorization=env:BB_TOKEN_A' --owns 1042
+python3 -m bbagent.cli account B --role user --token 'Authorization=env:BB_TOKEN_B' --owns 1043
+
+# 5c. run the research loop (continues past a clean scan)
+python3 -m bbagent.cli research
+python3 -m bbagent.cli blockers        # anything it needs from you
+python3 -m bbagent.cli resolve B-acco-1a2b3c4d --note 'account B provided'
 
 # 6. list findings, render a report, finalize
 python3 -m bbagent.cli findings
@@ -109,9 +180,30 @@ for t in tests/test_*.py; do python3 "$t"; done
 # or, if you have pytest:  python3 -m pytest -q
 ```
 
+## State and secrets
+
+State lives in the SQLite DB in the workspace: engagements, findings, tool runs,
+scope decisions, the attack-surface graph, the application model, hypotheses,
+blockers, the research log, and the current state. The graph is written after
+**every** recon step, so a crash cannot discard discovered endpoints. Full tool
+output goes to the content-addressed evidence store and the row keeps the hash.
+
+Account secrets are never stored. `--token 'Authorization=env:BB_TOKEN_B'` records
+the *reference*; the value is read from the environment at request time.
+
 ## What's deliberately not here yet
 
-See `ROADMAP.md`. Short version: live recon agents, LLM multi-agent
-orchestration, Strix / Agentic-Bug-Hunter adapters, platform scrapers, and the
-sandbox container are later phases. The interfaces are shaped so they drop in
-without touching the scope engine.
+See `ROADMAP.md`. Short version: browser automation (UI-to-API correlation),
+Strix / Agentic-Bug-Hunter adapters as execution backends, platform scrapers, and
+running tools inside the sandbox container. The interfaces are shaped so they
+drop in without touching the scope engine.
+
+## Benchmarks
+
+`benchmarks/mock_app.py` is deliberately clean to a template scanner and broken
+only in a way that requires comparing two identities. It is the regression target
+for "research depth, not scanner count":
+
+```bash
+PYTHONPATH=$(pwd) python3 benchmarks/run_benchmark.py
+```

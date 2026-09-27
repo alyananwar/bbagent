@@ -13,4 +13,5 @@ dependencies = []          # core is stdlib-only on purpose
 bbagent = "bbagent.cli:main"
 
 [tool.setuptools]
-packages = ["bbagent"]
+packages = ["bbagent", "bbagent.agents", "bbagent.llm", "bbagent.platforms",
+            "bbagent.recon", "bbagent.research"]

@@ -63,6 +63,13 @@ def test_active_adapter_injects_headers_and_rate():
     assert "-rl" in args and "10" in args
 
 
+def test_katana_crawl_is_time_bounded():
+    """Without -ct the crawl only ends when we kill it, and katana buffers output
+    until exit, so the kill throws the whole crawl away."""
+    args = adapters.get("katana").build_args("http://x/", None, None)
+    assert "-ct" in args and int(args[args.index("-ct") + 1]) > 0
+
+
 def test_passive_adapter_ignores_headers():
     args = adapters.get("subfinder").build_args("x.com", {"User-Agent": "ua"}, 10)
     assert "-H" not in args and "-rl" not in args

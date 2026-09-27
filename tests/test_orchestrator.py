@@ -25,7 +25,7 @@ def test_run_recon_records_outcomes():
         summary = orch.run_recon()
         # tools aren't installed in CI, so steps land in not_installed, but the
         # gate ran and logged decisions
-        total = sum(len(v) for v in summary.values())
+        total = sum(len(v) for v in summary.values() if isinstance(v, list))
         assert total > 0
         # scope decisions were logged
         rows = db.conn.execute("SELECT COUNT(*) c FROM scope_decisions WHERE engagement_id=?",
