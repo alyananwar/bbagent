@@ -699,7 +699,145 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("approve", help="finalize a finding (human gate; not submission)")
     sp.add_argument("finding_id", type=int)
     sp.set_defaults(func=cmd_approve)
+
+    sp = sub.add_parser("scout", help="rank program briefs by reward vs friction")
+    sp.add_argument("--dir", default="briefs", help="directory of one brief per program")
+    sp.add_argument("--brief", help="score a single brief file instead")
+    sp.add_argument("--name", help="program name for --brief (default: filename)")
+    sp.add_argument("--reward", type=int, help="max reward in dollars, if not in the brief")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_scout)
+
+    sp = sub.add_parser("story", help="human-voiced report (requires a certified finding)")
+    sp.add_argument("finding_id", type=int)
+    sp.add_argument("--fake", action="store_true", help="use the stub provider, no API call")
+    sp.set_defaults(func=cmd_story)
+
+    sp = sub.add_parser("submitcheck", help="check a finding against program rules; never submits")
+    sp.add_argument("finding_id", type=int)
+    sp.add_argument("--out", help="write the package to this path")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--engagement", type=int)
+    sp.set_defaults(func=cmd_submitcheck)
+
+    sp = sub.add_parser("submitted", help="record that you submitted a finding yourself")
+    sp.add_argument("finding_id", type=int)
+    sp.set_defaults(func=cmd_submitted)
+
     return p
+
+
+def _load_finding(db, finding_id):
+    """Return (Finding, err_message). Shared by report/story/submitcheck."""
+    from .models import Finding
+    row = db.get_finding(finding_id)
+    if not row:
+        return None, "finding #%d not found." % finding_id
+    d = json.loads(row["data"])
+    d["status"] = FindingStatus(d.get("status", "draft"))
+    return Finding(**{k: d[k] for k in d if k in Finding.__dataclass_fields__}), ""
+
+
+def cmd_scout(args) -> int:
+    """Scout: rank program briefs on disk by reward against friction."""
+    from . import scout
+    if args.brief:
+        with open(args.brief, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        name = args.name or os.path.splitext(os.path.basename(args.brief))[0]
+        candidates = [scout.evaluate(name, text, path=args.brief, max_reward=args.reward)]
+    else:
+        if not os.path.isdir(args.dir):
+            print("not a directory: %s" % args.dir, file=sys.stderr)
+            return 2
+        candidates = scout.load_dir(args.dir)
+    if args.json:
+        print(json.dumps([c.to_dict() for c in scout.rank(candidates)], indent=2))
+    else:
+        print(scout.render(candidates))
+    return 0
+
+
+def cmd_story(args) -> int:
+    """Storyteller: human-voiced report. Refuses until the finding is certified."""
+    from .agents import report_writer
+    db = _db(args)
+    finding, err = _load_finding(db, args.finding_id)
+    if err:
+        print(err, file=sys.stderr)
+        db.close()
+        return 2
+    if args.fake:
+        from .llm.fake import FakeProvider
+        provider = FakeProvider()
+    else:
+        from .llm.anthropic_provider import AnthropicProvider
+        try:
+            provider = AnthropicProvider()
+        except Exception as exc:                      # noqa: BLE001 - missing key or sdk
+            print("no LLM provider: %r" % exc, file=sys.stderr)
+            print("the deterministic report needs no model: `bbagent report %d`"
+                  % args.finding_id, file=sys.stderr)
+            db.close()
+            return 4
+    try:
+        print(report_writer.narrate(finding, provider))
+    except report_writer.NotCertified as exc:
+        print(str(exc), file=sys.stderr)
+        db.close()
+        return 3
+    except Exception as exc:                          # noqa: BLE001 - incomplete finding
+        print("%r" % exc, file=sys.stderr)
+        db.close()
+        return 3
+    db.close()
+    return 0
+
+
+def cmd_submitcheck(args) -> int:
+    """Submitter: compliance check + package. Never sends anything."""
+    from . import submit
+    db = _db(args)
+    eng_id = _resolve_eng(db, args)
+    if not eng_id:
+        print("no engagement; run `bbagent program` first.", file=sys.stderr)
+        db.close()
+        return 2
+    row, pol = _load_policy(db, eng_id)
+    if pol is None:
+        print("could not load scope policy for engagement %s." % eng_id, file=sys.stderr)
+        db.close()
+        return 2
+    finding, err = _load_finding(db, args.finding_id)
+    if err:
+        print(err, file=sys.stderr)
+        db.close()
+        return 2
+    program = json.loads(row["data"]).get("program", "") if row else ""
+    result = submit.check(finding, pol, finding_id=args.finding_id)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        text = submit.package(finding, pol, program=program, finding_id=args.finding_id)
+        if args.out:
+            submit.write_package(args.out, text)
+            print("package written to %s (%s)"
+                  % (args.out, "ready to send by hand" if result.ready else "NOT ready"))
+        else:
+            print(text)
+    db.close()
+    return 0 if result.ready else 3
+
+
+def cmd_submitted(args) -> int:
+    """Record that YOU submitted a finding. bbagent never submits."""
+    db = _db(args)
+    ok = db.set_finding_status(args.finding_id, FindingStatus.SUBMITTED)
+    print("finding #%d marked submitted." % args.finding_id if ok
+          else "could not mark #%d submitted (not found)." % args.finding_id,
+          file=sys.stdout if ok else sys.stderr)
+    db.close()
+    return 0 if ok else 2
 
 
 def main(argv=None) -> int:
