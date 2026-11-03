@@ -1,5 +1,7 @@
 # bbagent
 
+**A bug bounty research loop. It forms hypotheses, tests them with two researcher accounts, and only reports what it can reproduce.**
+
 <p align="center">
   <img src="docs/demo.gif" alt="bbagent benchmark run against a local mock app: 8 hypotheses, 7 rejected, 1 validated authorization bug" width="800">
 </p>
