@@ -1,5 +1,9 @@
 # bbagent
 
+<p align="center">
+  <img src="docs/demo.gif" alt="bbagent benchmark run against a local mock app: 8 hypotheses, 7 rejected, 1 validated authorization bug" width="800">
+</p>
+
 An authorized bug bounty research tool. This repo is the safe core: the parts
 that decide what's allowed, keep evidence honest, and produce a clean report.
 It does not attack anything on its own. Live recon and testing run as gated
